@@ -648,16 +648,26 @@ void avg_vruntime_update(struct cfs_rq *cfs_rq, s64 delta)
 }
 
 /*
- * Specifically: avg_runtime() + 0 must result in entity_eligible() := true
+ * Specifically: __avg_vruntime() + 0 must result in entity_eligible() := true
  * For this to be so, the result of this function must have a left bias.
+ * If se is not NULL, calculate avg_vruntime as if se is on the cfs_rq.
  */
-u64 avg_vruntime(struct cfs_rq *cfs_rq)
+static u64 __avg_vruntime(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct sched_entity *curr = cfs_rq->curr;
 	s64 avg = cfs_rq->avg_vruntime;
 	long load = cfs_rq->avg_load;
 
 	if (curr && curr->on_rq) {
+		unsigned long weight = scale_load_down(curr->load.weight);
+
+		avg += entity_key(cfs_rq, curr) * weight;
+		load += weight;
+	}
+
+	SCHED_WARN_ON(se && se->cfs_rq != cfs_rq);
+
+	if (se && !se->on_rq) {
 		unsigned long weight = scale_load_down(curr->load.weight);
 
 		avg += entity_key(cfs_rq, curr) * weight;
@@ -672,6 +682,11 @@ u64 avg_vruntime(struct cfs_rq *cfs_rq)
 	}
 
 	return cfs_rq->min_vruntime + avg;
+}
+
+u64 avg_vruntime(struct cfs_rq *cfs_rq)
+{
+	return __avg_vruntime(cfs_rq, NULL);
 }
 
 /*
@@ -695,7 +710,7 @@ static void update_entity_lag(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	s64 lag, limit;
 
 	SCHED_WARN_ON(!se->on_rq);
-	lag = avg_vruntime(cfs_rq) - se->vruntime;
+	lag = __avg_vruntime(cfs_rq, se) - se->vruntime;
 
 	limit = calc_delta_fair(max_t(u64, 2*se->slice, TICK_NSEC), se);
 	se->vlag = clamp(lag, -limit, limit);
