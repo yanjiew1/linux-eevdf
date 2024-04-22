@@ -709,7 +709,6 @@ static void update_entity_lag(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	s64 lag, limit;
 
-	SCHED_WARN_ON(!se->on_rq);
 	lag = __avg_vruntime(cfs_rq, se) - se->vruntime;
 
 	limit = calc_delta_fair(max_t(u64, 2*se->slice, TICK_NSEC), se);
@@ -5185,6 +5184,7 @@ static inline void update_misfit_status(struct task_struct *p, struct rq *rq) {}
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
+	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
 	u64 vslice, vruntime = avg_vruntime(cfs_rq);
 	s64 lag = 0;
 
@@ -5199,7 +5199,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 *
 	 * EEVDF: placement strategy #1 / #2
 	 */
-	if (sched_feat(PLACE_LAG) && cfs_rq->nr_running) {
+	if (renorm && sched_feat(PLACE_LAG) && cfs_rq->nr_running) {
 		struct sched_entity *curr = cfs_rq->curr;
 		unsigned long load;
 
@@ -5267,7 +5267,13 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 		lag = div_s64(lag, load);
 	}
 
-	se->vruntime = vruntime - lag;
+	if (renorm) {
+		se->vruntime = vruntime - lag;
+	} else {
+		s64 delta = se->vruntime - vruntime;
+		if (delta < 0 || delta > 2*vslice)
+			se->vruntime = vruntime;
+	}
 
 	/*
 	 * When joining the competition; the existing tasks will be,
@@ -8271,6 +8277,19 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 {
 	struct sched_entity *se = &p->se;
+
+	/*
+	 * Blocked tasks do not contains vlag as update_entity_lag() is not called
+	 * during dequeue_entity(). Update the vlag here and enqueue_entity() will
+	 * call place_entity() to update vruntime with correct value before the
+	 * task is enqueued.
+	 */
+	if (READ_ONCE(p->__state) == TASK_WAKING) {
+		struct cfs_rq *cfs_rq = cfs_rq_of(se);
+		update_entity_lag(cfs_rq, se);
+		if (se->vlag > 0)
+			se->vlag = 0;
+	}
 
 	if (!task_on_rq_migrating(p)) {
 		remove_entity_load_avg(se);
